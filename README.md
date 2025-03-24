@@ -42,4 +42,10 @@ O controle consiste em:
 ### Diagrama de Blocos:
 ![Diagrama_controle_Tetris drawio](https://github.com/user-attachments/assets/4867729b-e4f4-4f50-b030-57bf39ea9b91)
 
+---
+
+### Imagem do Controle:
+![13cce9ca-3631-44f2-959a-bb348d3cabde](https://github.com/user-attachments/assets/e8a93acd-d167-496d-8cbe-7be8dae2b846)
+
+
 
