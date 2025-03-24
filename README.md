@@ -3,7 +3,7 @@
 # Controle para o jogo Tetris
 
 Jogo: TETRIS;
-Ideia do controle:
+*Ideia do controle:
 
   O controle consiste em:
   - Dois botões rotativos onde, um é para a a rotação da peça e o outro para movimentação horizontal (esqueda e direita) e, ao pertar o botão de movimentação, ele desce a peça;
