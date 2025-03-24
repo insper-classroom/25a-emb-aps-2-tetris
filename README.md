@@ -40,5 +40,6 @@ O controle consiste em:
 ---
 
 ### Diagrama de Blocos:
-*(Diagrama a ser inserido)*
+![Diagrama_controle_Tetris drawio](https://github.com/user-attachments/assets/4867729b-e4f4-4f50-b030-57bf39ea9b91)
+
 
