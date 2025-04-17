@@ -1,137 +1,168 @@
-/*
- * LED blink with FreeRTOS
- */
-#include <FreeRTOS.h>
-#include <task.h>
-#include <semphr.h>
-#include <queue.h>
-
-#include "ssd1306.h"
-#include "gfx.h"
-
-#include "pico/stdlib.h"
 #include <stdio.h>
+#include <stdlib.h>
+#include "pico/stdlib.h"
+#include "hardware/adc.h"
+#include "hardware/uart.h"
+#include "hardware/gpio.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include "queue.h"
 
-const uint BTN_1_OLED = 28;
-const uint BTN_2_OLED = 26;
-const uint BTN_3_OLED = 27;
+typedef struct {
+    int axis;   // 0 = X, 1 = Y, 2 = Botão
+    int val;    // valor filtrado ou estado do botão
+} adc_data_t;
 
-const uint LED_1_OLED = 20;
-const uint LED_2_OLED = 21;
-const uint LED_3_OLED = 22;
+#define BTN_PIN        18
 
-void oled1_btn_led_init(void) {
-    gpio_init(LED_1_OLED);
-    gpio_set_dir(LED_1_OLED, GPIO_OUT);
+#define ADC_X          26
+#define ADC_Y          27
 
-    gpio_init(LED_2_OLED);
-    gpio_set_dir(LED_2_OLED, GPIO_OUT);
+#define UART_ID        uart0
+#define UART_TX_PIN    1
+#define UART_RX_PIN    2
 
-    gpio_init(LED_3_OLED);
-    gpio_set_dir(LED_3_OLED, GPIO_OUT);
+#define ZERO_OFFSET    2048
+#define FULLSCALE      2048
+#define SCALE_MAX      255
+#define ZONA_MORTA     30
 
-    gpio_init(BTN_1_OLED);
-    gpio_set_dir(BTN_1_OLED, GPIO_IN);
-    gpio_pull_up(BTN_1_OLED);
+#define WINDOW_SIZE    5
+#define SAMPLE_DELAY_MS 300
+#define DEBOUNCE_MS    50
 
-    gpio_init(BTN_2_OLED);
-    gpio_set_dir(BTN_2_OLED, GPIO_IN);
-    gpio_pull_up(BTN_2_OLED);
+QueueHandle_t xQueueADC;
 
-    gpio_init(BTN_3_OLED);
-    gpio_set_dir(BTN_3_OLED, GPIO_IN);
-    gpio_pull_up(BTN_3_OLED);
+static int filtrar_valor(int raw_value) {
+    int offset = raw_value - ZERO_OFFSET;
+    int scaled = (offset * SCALE_MAX) / FULLSCALE;
+    if (abs(scaled) < ZONA_MORTA) scaled = 0;
+    if (scaled > SCALE_MAX)  scaled = SCALE_MAX;
+    if (scaled < -SCALE_MAX) scaled = -SCALE_MAX;
+    return scaled;
 }
 
-void oled1_demo_1(void *p) {
-    printf("Inicializando Driver\n");
-    ssd1306_init();
+static void x_task(void *pvParameters) {
+    int buffer[WINDOW_SIZE] = {0};
+    int soma = 0, index = 0;
+    adc_data_t pacote;
 
-    printf("Inicializando GLX\n");
-    ssd1306_t disp;
-    gfx_init(&disp, 128, 32);
-
-    printf("Inicializando btn and LEDs\n");
-    oled1_btn_led_init();
-
-    char cnt = 15;
     while (1) {
+        adc_select_input(0);
+        int leitura = adc_read();
 
-        if (gpio_get(BTN_1_OLED) == 0) {
-            cnt = 15;
-            gpio_put(LED_1_OLED, 0);
-            gfx_clear_buffer(&disp);
-            gfx_draw_string(&disp, 0, 0, 1, "LED 1 - ON");
-            gfx_show(&disp);
-        } else if (gpio_get(BTN_2_OLED) == 0) {
-            cnt = 15;
-            gpio_put(LED_2_OLED, 0);
-            gfx_clear_buffer(&disp);
-            gfx_draw_string(&disp, 0, 0, 1, "LED 2 - ON");
-            gfx_show(&disp);
-        } else if (gpio_get(BTN_3_OLED) == 0) {
-            cnt = 15;
-            gpio_put(LED_3_OLED, 0);
-            gfx_clear_buffer(&disp);
-            gfx_draw_string(&disp, 0, 0, 1, "LED 3 - ON");
-            gfx_show(&disp);
-        } else {
+        soma -= buffer[index];
+        buffer[index] = leitura;
+        soma += leitura;
 
-            gpio_put(LED_1_OLED, 1);
-            gpio_put(LED_2_OLED, 1);
-            gpio_put(LED_3_OLED, 1);
-            gfx_clear_buffer(&disp);
-            gfx_draw_string(&disp, 0, 0, 1, "PRESSIONE ALGUM");
-            gfx_draw_string(&disp, 0, 10, 1, "BOTAO");
-            gfx_draw_line(&disp, 15, 27, cnt,
-                          27);
-            vTaskDelay(pdMS_TO_TICKS(50));
-            if (++cnt == 112)
-                cnt = 15;
+        index = (index + 1) % WINDOW_SIZE;
 
-            gfx_show(&disp);
-        }
+        pacote.axis = 0;
+        int media = soma / WINDOW_SIZE;
+        pacote.val = filtrar_valor(media);
+
+        xQueueSend(xQueueADC, &pacote, pdMS_TO_TICKS(200));
+        vTaskDelay(pdMS_TO_TICKS(SAMPLE_DELAY_MS));
     }
 }
 
-void oled1_demo_2(void *p) {
-    printf("Inicializando Driver\n");
-    ssd1306_init();
+static void y_task(void *pvParameters) {
+    int buffer[WINDOW_SIZE] = {0};
+    int soma = 0, index = 0;
+    adc_data_t pacote;
 
-    printf("Inicializando GLX\n");
-    ssd1306_t disp;
-    gfx_init(&disp, 128, 32);
-
-    printf("Inicializando btn and LEDs\n");
-    oled1_btn_led_init();
-
-    char cnt = 15;
     while (1) {
+        adc_select_input(1);
+        int leitura = adc_read();
 
-        gfx_clear_buffer(&disp);
-        gfx_draw_string(&disp, 0, 0, 1, "Mandioca");
-        gfx_show(&disp);
-        vTaskDelay(pdMS_TO_TICKS(150));
+        soma -= buffer[index];
+        buffer[index] = leitura;
+        soma += leitura;
 
-        gfx_clear_buffer(&disp);
-        gfx_draw_string(&disp, 0, 0, 2, "Batata");
-        gfx_show(&disp);
-        vTaskDelay(pdMS_TO_TICKS(150));
+        index = (index + 1) % WINDOW_SIZE;
 
-        gfx_clear_buffer(&disp);
-        gfx_draw_string(&disp, 0, 0, 4, "Inhame");
-        gfx_show(&disp);
-        vTaskDelay(pdMS_TO_TICKS(150));
+        pacote.axis = 1;
+        int media = soma / WINDOW_SIZE;
+        pacote.val = filtrar_valor(media);
+
+        xQueueSend(xQueueADC, &pacote, pdMS_TO_TICKS(200));
+        vTaskDelay(pdMS_TO_TICKS(SAMPLE_DELAY_MS));
+    }
+}
+
+static void button_task(void *pvParameters) {
+    adc_data_t pacote;
+    int last_state = gpio_get(BTN_PIN);
+    int stable_state = last_state;
+    TickType_t last_change = xTaskGetTickCount();
+
+    while (1) {
+        int cur = gpio_get(BTN_PIN);
+        if (cur != stable_state) {
+            last_change = xTaskGetTickCount();
+            stable_state = cur;
+        }
+        // aguarda debounce
+        if ((xTaskGetTickCount() - last_change) > pdMS_TO_TICKS(DEBOUNCE_MS)) {
+            if (stable_state != last_state) {
+                // houve mudança de estado
+                pacote.axis = 2;
+                // supondo pull-up: 0 = pressionado, 1 = solto
+                pacote.val = (stable_state == 0) ? 1 : 0;
+                xQueueSend(xQueueADC, &pacote, pdMS_TO_TICKS(200));
+                last_state = stable_state;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+static void uart_task(void *pvParameters) {
+    adc_data_t recebido;
+    uint8_t pacote[4];
+
+    while (1) {
+        if (xQueueReceive(xQueueADC, &recebido, portMAX_DELAY) == pdTRUE) {
+            int v = recebido.val;
+            pacote[0] = 0xFF;                     // header
+            pacote[1] = (uint8_t)recebido.axis;  // eixo ou botão
+            pacote[2] = v & 0xFF;                // LSB
+            pacote[3] = (v >> 8) & 0xFF;         // MSB
+
+            uart_write_blocking(UART_ID, pacote, sizeof(pacote));
+        }
     }
 }
 
 int main() {
     stdio_init_all();
 
-    xTaskCreate(oled1_demo_2, "Demo 2", 4095, NULL, 1, NULL);
+    // inicialização ADC
+    adc_init();
+    adc_gpio_init(ADC_X);
+    adc_gpio_init(ADC_Y);
+
+    // inicialização UART
+    uart_init(UART_ID, 115200);
+    gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
+    gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
+
+    // inicialização botão
+    gpio_init(BTN_PIN);
+    gpio_set_dir(BTN_PIN, GPIO_IN);
+    gpio_pull_up(BTN_PIN);
+
+    // fila para todos os pacotes
+    xQueueADC = xQueueCreate(32, sizeof(adc_data_t));
+
+    // criação de tarefas
+    xTaskCreate(x_task,      "x_task",      4096, NULL, 1, NULL);
+    xTaskCreate(y_task,      "y_task",      4096, NULL, 1, NULL);
+    xTaskCreate(button_task, "button_task", 2048, NULL, 1, NULL);
+    xTaskCreate(uart_task,   "uart_task",   4096, NULL, 1, NULL);
 
     vTaskStartScheduler();
 
-    while (true)
-        ;
+    while (1) { }
+    return 0;
 }
