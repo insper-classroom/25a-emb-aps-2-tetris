@@ -2,6 +2,7 @@ import sys
 import glob
 import serial
 import pyautogui
+pyautogui.PAUSE = 0.0
 import tkinter as tk
 from tkinter import ttk
 from tkinter import messagebox
@@ -9,10 +10,16 @@ from time import sleep
 
 def move_mouse(axis, value):
     """Move o mouse de acordo com o eixo e valor recebidos."""
-    if axis == 0:
-        pyautogui.moveRel(value, 0)
-    elif axis == 1:
-        pyautogui.moveRel(0, value)
+    if axis == 2:
+        pyautogui.press('c')
+    elif axis == 3:
+        pyautogui.press('up')
+    elif axis == 4:
+        pyautogui.press('right')
+    elif axis == 5:
+        pyautogui.press('left')
+    elif axis == 6:
+        pyautogui.press('space')
 
 def controle(ser):
     """
@@ -29,15 +36,9 @@ def controle(ser):
             data = ser.read(size=3)
             if len(data) < 3:
                 continue
-
             print(data)
             axis, value = parse_data(data)
-            
-            if axis in (0,1):
-                move_mouse(axis, value)
-            elif axis == 2:
-                if value == 1:
-                    pyautogui.press("space")
+            move_mouse(axis, value)
 
 def serial_ports():
     """Retorna uma lista das portas seriais disponíveis na máquina."""

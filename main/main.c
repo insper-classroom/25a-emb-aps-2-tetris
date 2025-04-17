@@ -1,168 +1,159 @@
-#include <stdio.h>
-#include <stdlib.h>
+#include <FreeRTOS.h>
+#include <task.h>
+#include <queue.h>
+
 #include "pico/stdlib.h"
-#include "hardware/adc.h"
 #include "hardware/uart.h"
 #include "hardware/gpio.h"
-#include "FreeRTOS.h"
-#include "task.h"
-#include "queue.h"
+#include "hardware/i2c.h"
+#include "mpu6050.h"
+#include "Fusion.h"
+
+#define UART_ID           uart0
+#define BAUD_RATE         115200
+#define UART_TX_PIN       0
+#define UART_RX_PIN       1
+
+#define SAMPLE_MS         10
+#define SAMPLE_PERIOD     (SAMPLE_MS/1000.0f)
+
+#define CLICK_THRESHOLD   24576
+// GPIOs digitais
+#define PIN_ROTATE        10      // ↑
+#define PIN_MOVE_RIGHT    11      // →
+#define PIN_MOVE_LEFT     12      // ←
+#define PIN_HARD_DROP     13      // SPACE
+
 
 typedef struct {
-    int axis;   // 0 = X, 1 = Y, 2 = Botão
-    int val;    // valor filtrado ou estado do botão
-} adc_data_t;
+    uint8_t axis;
+    int16_t val;
+} event_t;
 
-#define BTN_PIN        18
+static QueueHandle_t  xQueuePos;
 
-#define ADC_X          26
-#define ADC_Y          27
-
-#define UART_ID        uart0
-#define UART_TX_PIN    1
-#define UART_RX_PIN    2
-
-#define ZERO_OFFSET    2048
-#define FULLSCALE      2048
-#define SCALE_MAX      255
-#define ZONA_MORTA     30
-
-#define WINDOW_SIZE    5
-#define SAMPLE_DELAY_MS 300
-#define DEBOUNCE_MS    50
-
-QueueHandle_t xQueueADC;
-
-static int filtrar_valor(int raw_value) {
-    int offset = raw_value - ZERO_OFFSET;
-    int scaled = (offset * SCALE_MAX) / FULLSCALE;
-    if (abs(scaled) < ZONA_MORTA) scaled = 0;
-    if (scaled > SCALE_MAX)  scaled = SCALE_MAX;
-    if (scaled < -SCALE_MAX) scaled = -SCALE_MAX;
-    return scaled;
+static void mpu6050_reset() {
+    // Two byte reset. First byte register, second byte data
+    // There are a load more options to set up the device in different ways that could be added here
+    uint8_t buf[] = {0x6B, 0x00};
+    i2c_write_blocking(i2c_default, MPU_ADDRESS, buf, 2, false);
 }
 
-static void x_task(void *pvParameters) {
-    int buffer[WINDOW_SIZE] = {0};
-    int soma = 0, index = 0;
-    adc_data_t pacote;
+static void mpu6050_read_raw(int16_t accel[3], int16_t gyro[3], int16_t *temp) {
+    // For this particular device, we send the device the register we want to read
+    // first, then subsequently read from the device. The register is auto incrementing
+    // so we don't need to keep sending the register we want, just the first.
 
-    while (1) {
-        adc_select_input(0);
-        int leitura = adc_read();
+    uint8_t buffer[6];
 
-        soma -= buffer[index];
-        buffer[index] = leitura;
-        soma += leitura;
+    // Start reading acceleration registers from register 0x3B for 6 bytes
+    uint8_t val = 0x3B;
+    i2c_write_blocking(i2c_default, MPU_ADDRESS, &val, 1, true); // true to keep master control of bus
+    i2c_read_blocking(i2c_default, MPU_ADDRESS, buffer, 6, false);
 
-        index = (index + 1) % WINDOW_SIZE;
-
-        pacote.axis = 0;
-        int media = soma / WINDOW_SIZE;
-        pacote.val = filtrar_valor(media);
-
-        xQueueSend(xQueueADC, &pacote, pdMS_TO_TICKS(200));
-        vTaskDelay(pdMS_TO_TICKS(SAMPLE_DELAY_MS));
+    for (int i = 0; i < 3; i++) {
+        accel[i] = (buffer[i * 2] << 8 | buffer[(i * 2) + 1]);
     }
-}
 
-static void y_task(void *pvParameters) {
-    int buffer[WINDOW_SIZE] = {0};
-    int soma = 0, index = 0;
-    adc_data_t pacote;
+    // Now gyro data from reg 0x43 for 6 bytes
+    // The register is auto incrementing on each read
+    val = 0x43;
+    i2c_write_blocking(i2c_default, MPU_ADDRESS, &val, 1, true);
+    i2c_read_blocking(i2c_default, MPU_ADDRESS, buffer, 6, false);  // False - finished with bus
 
-    while (1) {
-        adc_select_input(1);
-        int leitura = adc_read();
-
-        soma -= buffer[index];
-        buffer[index] = leitura;
-        soma += leitura;
-
-        index = (index + 1) % WINDOW_SIZE;
-
-        pacote.axis = 1;
-        int media = soma / WINDOW_SIZE;
-        pacote.val = filtrar_valor(media);
-
-        xQueueSend(xQueueADC, &pacote, pdMS_TO_TICKS(200));
-        vTaskDelay(pdMS_TO_TICKS(SAMPLE_DELAY_MS));
+    for (int i = 0; i < 3; i++) {
+        gyro[i] = (buffer[i * 2] << 8 | buffer[(i * 2) + 1]);;
     }
+
+    // Now temperature from reg 0x41 for 2 bytes
+    // The register is auto incrementing on each read
+    val = 0x41;
+    i2c_write_blocking(i2c_default, MPU_ADDRESS, &val, 1, true);
+    i2c_read_blocking(i2c_default, MPU_ADDRESS, buffer, 2, false);  // False - finished with bus
+
+    *temp = buffer[0] << 8 | buffer[1];
 }
 
-static void button_task(void *pvParameters) {
-    adc_data_t pacote;
-    int last_state = gpio_get(BTN_PIN);
-    int stable_state = last_state;
-    TickType_t last_change = xTaskGetTickCount();
+void mpu6050_task(void *p) {
+    i2c_init(i2c_default, 400*1000);
+    gpio_set_function(4, GPIO_FUNC_I2C);
+    gpio_set_function(5, GPIO_FUNC_I2C);
+    gpio_pull_up(4); gpio_pull_up(5);
+
+    mpu6050_reset();
+    FusionAhrs ahrs;
+    FusionAhrsInitialise(&ahrs);
+
+    int16_t accel[3], gyro[3], temp;
+    bool clicked = false;
 
     while (1) {
-        int cur = gpio_get(BTN_PIN);
-        if (cur != stable_state) {
-            last_change = xTaskGetTickCount();
-            stable_state = cur;
-        }
-        // aguarda debounce
-        if ((xTaskGetTickCount() - last_change) > pdMS_TO_TICKS(DEBOUNCE_MS)) {
-            if (stable_state != last_state) {
-                // houve mudança de estado
-                pacote.axis = 2;
-                // supondo pull-up: 0 = pressionado, 1 = solto
-                pacote.val = (stable_state == 0) ? 1 : 0;
-                xQueueSend(xQueueADC, &pacote, pdMS_TO_TICKS(200));
-                last_state = stable_state;
+        mpu6050_read_raw(accel, gyro, &temp);
+
+        // detecta “cutucada” no X
+        if (abs(accel[0]) > CLICK_THRESHOLD) {
+            if (!clicked) {
+                event_t ev = { .axis = 2, .val = 1 };
+                xQueueSend(xQueuePos, &ev, 0);
+                clicked = true;
             }
+        } else {
+            clicked = false;
         }
+
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
-static void uart_task(void *pvParameters) {
-    adc_data_t recebido;
-    uint8_t pacote[4];
+void digital_task(void *p) {
+    const int pins[4] = { PIN_ROTATE, PIN_MOVE_RIGHT, PIN_MOVE_LEFT, PIN_HARD_DROP };
+    for (int i = 0; i < 4; i++) {
+        gpio_init(pins[i]);
+        gpio_set_dir(pins[i], GPIO_IN);
+        gpio_pull_up(pins[i]);
+    }
+    bool last[4] = {false};
 
     while (1) {
-        if (xQueueReceive(xQueueADC, &recebido, portMAX_DELAY) == pdTRUE) {
-            int v = recebido.val;
-            pacote[0] = 0xFF;                     // header
-            pacote[1] = (uint8_t)recebido.axis;  // eixo ou botão
-            pacote[2] = v & 0xFF;                // LSB
-            pacote[3] = (v >> 8) & 0xFF;         // MSB
+        for (int i = 0; i < 4; i++) {
+            bool pressed = !gpio_get(pins[i]);
+            if (pressed && !last[i]) {
+                event_t ev = { .axis = (uint8_t)(3 + i), .val = 1 };
+                xQueueSend(xQueuePos, &ev, 0);
+            }
+            last[i] = pressed;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
 
-            uart_write_blocking(UART_ID, pacote, sizeof(pacote));
+void uart_task(void *p) {
+    uart_init(UART_ID, BAUD_RATE);
+    gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
+    gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
+
+    event_t ev;
+    uint8_t pkt[4];
+    while (1) {
+        if (xQueueReceive(xQueuePos, &ev, portMAX_DELAY)) {
+            pkt[0] = 0xFF;
+            pkt[1] = ev.axis;
+            pkt[2] = ev.val & 0xFF;
+            pkt[3] = (ev.val >> 8) & 0xFF;
+            uart_write_blocking(UART_ID, pkt, 4);
         }
     }
 }
 
 int main() {
     stdio_init_all();
+    xQueuePos = xQueueCreate(16, sizeof(event_t));
 
-    // inicialização ADC
-    adc_init();
-    adc_gpio_init(ADC_X);
-    adc_gpio_init(ADC_Y);
-
-    // inicialização UART
-    uart_init(UART_ID, 115200);
-    gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
-    gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
-
-    // inicialização botão
-    gpio_init(BTN_PIN);
-    gpio_set_dir(BTN_PIN, GPIO_IN);
-    gpio_pull_up(BTN_PIN);
-
-    // fila para todos os pacotes
-    xQueueADC = xQueueCreate(32, sizeof(adc_data_t));
-
-    // criação de tarefas
-    xTaskCreate(x_task,      "x_task",      4096, NULL, 1, NULL);
-    xTaskCreate(y_task,      "y_task",      4096, NULL, 1, NULL);
-    xTaskCreate(button_task, "button_task", 2048, NULL, 1, NULL);
-    xTaskCreate(uart_task,   "uart_task",   4096, NULL, 1, NULL);
+    xTaskCreate(mpu6050_task,  "MPU", 2048, NULL, 1, NULL);
+    xTaskCreate(digital_task,  "DIG", 2048, NULL, 1, NULL);
+    xTaskCreate(uart_task,     "UART",2048, NULL, 1, NULL);
 
     vTaskStartScheduler();
-
-    while (1) { }
+    while (1) {}
     return 0;
 }
