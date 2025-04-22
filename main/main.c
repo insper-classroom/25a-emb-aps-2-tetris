@@ -6,6 +6,7 @@
 #include "hardware/uart.h"
 #include "hardware/gpio.h"
 #include "hardware/i2c.h"
+#include "semphr.h"
 #include "mpu6050.h"
 #include "Fusion.h"
 
@@ -14,15 +15,20 @@
 #define UART_TX_PIN       0
 #define UART_RX_PIN       1
 
+#define PIN_POWER       16    // botão liga/desliga
+#define PIN_LED         14    // LED indicador
+#define DEBOUNCE_MS     50
+
 #define SAMPLE_MS         10
 #define SAMPLE_PERIOD     (SAMPLE_MS/1000.0f)
+#define MPU_ADDRESS       0x68
 
-#define CLICK_THRESHOLD   24576
+#define CLICK_THRESHOLD   16384
 // GPIOs digitais
-#define PIN_ROTATE        10      // ↑
-#define PIN_MOVE_RIGHT    11      // →
-#define PIN_MOVE_LEFT     12      // ←
-#define PIN_HARD_DROP     13      // SPACE
+#define PIN_ROTATE        6      // ↑
+#define PIN_MOVE_RIGHT    7      // →
+#define PIN_MOVE_LEFT     8      // ←
+#define PIN_HARD_DROP     9      // SPACE
 
 
 typedef struct {
@@ -31,6 +37,56 @@ typedef struct {
 } event_t;
 
 static QueueHandle_t  xQueuePos;
+
+static SemaphoreHandle_t xPowerSem;
+static TaskHandle_t     xMpuHandle, xDigitalHandle, xUartHandle;
+
+// ——————————————
+// ISR do botão power
+// ——————————————
+void power_isr(uint gpio, uint32_t events) {
+    BaseType_t woken = pdFALSE;
+    // dá o semáforo para a power_task
+    xSemaphoreGiveFromISR(xPowerSem, &woken);
+    portYIELD_FROM_ISR(woken);
+}
+
+// ——————————————
+// power_task: toggle on/off via semáforo
+// ——————————————
+static void power_task(void *p) {
+    bool system_on = false;
+
+    // configura LED
+    gpio_init(PIN_LED);
+    gpio_set_dir(PIN_LED, GPIO_OUT);
+    gpio_put(PIN_LED, 0);
+
+    for (;;) {
+        // aguarda ISR
+        xSemaphoreTake(xPowerSem, portMAX_DELAY);
+
+        // debounce
+        vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_MS));
+        // confirma que continua pressionado (nível baixo)
+        if (gpio_get(PIN_POWER) == 0) {
+            system_on = !system_on;
+            gpio_put(PIN_LED, system_on ? 1 : 0);
+
+            if (system_on) {
+                // liga as tasks de leitura
+                vTaskResume(xMpuHandle);
+                vTaskResume(xDigitalHandle);
+                vTaskResume(xUartHandle);
+            } else {
+                // desliga as tasks de leitura
+                vTaskSuspend(xMpuHandle);
+                vTaskSuspend(xDigitalHandle);
+                vTaskSuspend(xUartHandle);
+            }
+        }
+    }
+}
 
 static void mpu6050_reset() {
     // Two byte reset. First byte register, second byte data
@@ -147,13 +203,36 @@ void uart_task(void *p) {
 
 int main() {
     stdio_init_all();
-    xQueuePos = xQueueCreate(16, sizeof(event_t));
 
-    xTaskCreate(mpu6050_task,  "MPU", 2048, NULL, 1, NULL);
-    xTaskCreate(digital_task,  "DIG", 2048, NULL, 1, NULL);
-    xTaskCreate(uart_task,     "UART",2048, NULL, 1, NULL);
+    // cria fila e semáforo
+    xQueuePos  = xQueueCreate(16, sizeof(event_t));
+    xPowerSem  = xSemaphoreCreateBinary();
+
+    // configura pino power e ISR
+    gpio_init(PIN_POWER);
+    gpio_set_dir(PIN_POWER, GPIO_IN);
+    gpio_pull_up(PIN_POWER);
+    gpio_set_irq_enabled_with_callback(
+        PIN_POWER,
+        GPIO_IRQ_EDGE_FALL,   // detecta press
+        true,
+        power_isr
+    );
+
+    // cria tasks e armazena handles
+    xTaskCreate(mpu6050_task,  "MPU",    2048, NULL, 1, &xMpuHandle);
+    xTaskCreate(digital_task,  "DIG",    2048, NULL, 1, &xDigitalHandle);
+    xTaskCreate(uart_task,     "UART",   2048, NULL, 1, &xUartHandle);
+
+    // inicialmente, mantemos as tasks de leitura SUSPENSAS
+    vTaskSuspend(xMpuHandle);
+    vTaskSuspend(xDigitalHandle);
+    vTaskSuspend(xUartHandle);
+
+    // por fim, cria a power_task (prioridade ligeiramente maior)
+    xTaskCreate(power_task,    "POWER",  512,  NULL, 2, NULL);
 
     vTaskStartScheduler();
-    while (1) {}
+    while (1) { tight_loop_contents(); }
     return 0;
 }

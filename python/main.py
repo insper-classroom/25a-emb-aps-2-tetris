@@ -2,11 +2,12 @@ import sys
 import glob
 import serial
 import pyautogui
-pyautogui.PAUSE = 0.0
 import tkinter as tk
 from tkinter import ttk
 from tkinter import messagebox
 from time import sleep
+
+pyautogui.PAUSE = 0.0
 
 def move_mouse(axis, value):
     """Move o mouse de acordo com o eixo e valor recebidos."""
