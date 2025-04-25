@@ -8,7 +8,9 @@
 #include "hardware/i2c.h"
 #include "semphr.h"
 #include "mpu6050.h"
+#include "hc06.h"
 #include "Fusion.h"
+
 
 #define UART_ID           uart0
 #define BAUD_RATE         115200
@@ -29,6 +31,14 @@
 #define PIN_MOVE_RIGHT    7      // →
 #define PIN_MOVE_LEFT     8      // ←
 #define PIN_HARD_DROP     9      // SPACE
+#define PIN_LED_BLUE           16   // blue status LED
+#define PIN_LED_RED            19   // red status LED
+
+// HC-06 “STATE” pin: HIGH when Bluetooth is connected
+#define PIN_BT_STATE           10
+
+// VBUS detect: HIGH when USB cable (PC) is plugged in
+volatile bool usb_connected_flag = false;
 
 
 typedef struct {
@@ -40,6 +50,21 @@ static QueueHandle_t  xQueuePos;
 
 static SemaphoreHandle_t xPowerSem;
 static TaskHandle_t     xMpuHandle, xDigitalHandle, xUartHandle;
+bool usb_connected = false; // Flag global
+
+
+void hc06_task(void *p) {
+    uart_init(HC06_UART_ID, HC06_BAUD_RATE);
+    gpio_set_function(HC06_TX_PIN, GPIO_FUNC_UART);
+    gpio_set_function(HC06_RX_PIN, GPIO_FUNC_UART);
+    hc06_init("TETRISTETRITETRIS ", "0000");
+
+    while (true) {
+        uart_puts(HC06_UART_ID, "OLAAA ");
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
 
 // ——————————————
 // ISR do botão power
@@ -201,6 +226,7 @@ void uart_task(void *p) {
     }
 }
 
+
 int main() {
     stdio_init_all();
 
@@ -212,6 +238,24 @@ int main() {
     gpio_init(PIN_POWER);
     gpio_set_dir(PIN_POWER, GPIO_IN);
     gpio_pull_up(PIN_POWER);
+
+    // gpio_init(PIN_LED_BLUE);
+    // gpio_set_dir(PIN_LED_BLUE, GPIO_OUT);
+    // gpio_put(PIN_LED_BLUE, 0);
+
+    // gpio_init(PIN_LED_RED);
+    // gpio_set_dir(PIN_LED_RED, GPIO_OUT);
+    // gpio_put(PIN_LED_RED, 0);
+
+    // // status inputs
+    // gpio_init(PIN_BT_STATE);
+    // gpio_set_dir(PIN_BT_STATE, GPIO_IN);
+    // gpio_pull_down(PIN_BT_STATE);
+
+    // gpio_init(HC06_ENABLE_PIN);
+    // gpio_set_dir(HC06_ENABLE_PIN, GPIO_OUT);
+
+
     gpio_set_irq_enabled_with_callback(
         PIN_POWER,
         GPIO_IRQ_EDGE_FALL,   // detecta press
@@ -230,6 +274,7 @@ int main() {
     vTaskSuspend(xUartHandle);
 
     // por fim, cria a power_task (prioridade ligeiramente maior)
+    xTaskCreate(hc06_task, "UART_Task 1", 4096, NULL, 1, NULL);
     xTaskCreate(power_task,    "POWER",  512,  NULL, 2, NULL);
 
     vTaskStartScheduler();
