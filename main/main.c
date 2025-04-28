@@ -29,8 +29,8 @@
 // GPIOs digitais
 #define PIN_ROTATE        6      // ↑
 #define PIN_MOVE_RIGHT    7      // →
-#define PIN_MOVE_LEFT     8      // ←
-#define PIN_HARD_DROP     9      // SPACE
+#define PIN_MOVE_LEFT     10      // ←
+#define PIN_HARD_DROP     11      // SPACE
 #define PIN_LED_BLUE           16   // blue status LED
 #define PIN_LED_RED            19   // red status LED
 
@@ -60,8 +60,8 @@ void hc06_task(void *p) {
     hc06_init("TETRISTETRITETRIS ", "0000");
 
     while (true) {
-        uart_puts(HC06_UART_ID, "OLAAA ");
-        vTaskDelay(pdMS_TO_TICKS(100));
+       /* uart_puts(HC06_UART_ID, "OLAAA ");
+        vTaskDelay(pdMS_TO_TICKS(100));*/
     }
 }
 
@@ -209,9 +209,15 @@ void digital_task(void *p) {
 }
 
 void uart_task(void *p) {
-    uart_init(UART_ID, BAUD_RATE);
-    gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
-    gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
+    //uart_init(UART_ID, BAUD_RATE);
+    //gpio_set_function(UART_TX_PIN, GPIO_FUNC_UART);
+    //gpio_set_function(UART_RX_PIN, GPIO_FUNC_UART);
+
+
+    uart_init(HC06_UART_ID, HC06_BAUD_RATE);
+    gpio_set_function(HC06_TX_PIN, GPIO_FUNC_UART);
+    gpio_set_function(HC06_RX_PIN, GPIO_FUNC_UART);
+   // hc06_init("TETRISTETRITETRIS ", "0000");
 
     event_t ev;
     uint8_t pkt[4];
@@ -221,7 +227,12 @@ void uart_task(void *p) {
             pkt[1] = ev.axis;
             pkt[2] = ev.val & 0xFF;
             pkt[3] = (ev.val >> 8) & 0xFF;
-            uart_write_blocking(UART_ID, pkt, 4);
+           // uart_write_blocking(UART_ID, pkt, 4);
+            uart_putc_raw(HC06_UART_ID,  pkt[0]);
+            uart_putc_raw(HC06_UART_ID,  pkt[1]);
+            uart_putc_raw(HC06_UART_ID,  pkt[2]);
+            uart_putc_raw(HC06_UART_ID,  pkt[3]);
+
         }
     }
 }
